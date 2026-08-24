@@ -54,6 +54,6 @@ im_bw = cv2.adaptiveThreshold(
 cv2.imwrite("data/processed/bw_image.jpg", im_bw)
 display("data/processed/bw_image.jpg")
 
-
-
-5
+no_noise = cv2.medianBlur(im_bw, 3)
+cv2.imwrite("data/processed/no_noise.jpg", no_noise)
+display("data/processed/no_noise.jpg")
