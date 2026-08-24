@@ -36,4 +36,24 @@ def grayscale(image):
 gray_image = grayscale(img)
 cv2.imwrite("data/processed/gray.jpg", gray_image)
 
+#display gray image
 display("data/processed/gray.jpg")
+
+blurred = cv2.GaussianBlur(gray_image, (3, 3), 0)
+ 
+# Adaptive Threshold — يحسب عتبة محلية لكل منطقة صغيرة
+# غير متأثر بالحواف السوداء الكبيرة حول الوثيقة (بخلاف Otsu)
+im_bw = cv2.adaptiveThreshold(
+    blurred, 255,
+    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+    cv2.THRESH_BINARY,
+    blockSize=31,   # حجم النافذة المحلية - جرب 21 إلى 41
+    C=15            # مقدار الطرح من المتوسط - جرب 10 إلى 20
+)
+ 
+cv2.imwrite("data/processed/bw_image.jpg", im_bw)
+display("data/processed/bw_image.jpg")
+
+
+
+5
