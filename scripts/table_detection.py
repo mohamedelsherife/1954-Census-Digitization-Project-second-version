@@ -1,9 +1,9 @@
 import cv2
 import numpy as np
 import os
+import glob
 
-
-def detect_table(image_path, output_dir="data/cells"):  
+def detect_table(image_path, output_dir="data/cells"):
     """
     Detect rows, columns, and cells from a preprocessed/denoised image.
     """
@@ -12,10 +12,10 @@ def detect_table(image_path, output_dir="data/cells"):
     # 1. Read the preprocessed image
     # ==========================================
 
-    image_path = "data/processed/1954-P000002_page-0001_denoised.png"
-    
-    img = cv2.imread(image_path)
+    # (تم حذف السطر اللي كان يعمل override لـ image_path هنا،
+    #  عشان الدالة تشتغل على أي صورة تنبعتلها كباراميتر)
 
+    img = cv2.imread(image_path)
 
     if img is None:
         raise FileNotFoundError(
@@ -80,9 +80,13 @@ def detect_table(image_path, output_dir="data/cells"):
     # Save grid image
     os.makedirs(output_dir, exist_ok=True)
 
+    # اسم الصورة بدون الامتداد، عشان نستخدمه في تسمية ملفات الإخراج
+    # فكل صورة تطلعلها ملفاتها الخاصة وما تتكتبش فوق بعض
+    base_name = os.path.splitext(os.path.basename(image_path))[0]
+
     grid_path = os.path.join(
         output_dir,
-        "detected_grid.png"
+        f"{base_name}_detected_grid.png"
     )
 
     cv2.imwrite(grid_path, grid)
@@ -203,7 +207,7 @@ def detect_table(image_path, output_dir="data/cells"):
 
     result_path = os.path.join(
         output_dir,
-        "detected_cells.png"
+        f"{base_name}_detected_cells.png"
     )
 
     cv2.imwrite(
@@ -215,15 +219,15 @@ def detect_table(image_path, output_dir="data/cells"):
     # 13. Print results
     # ==========================================
 
-    print("Number of rows:", len(rows))
+    print(f"[{base_name}] Number of rows:", len(rows))
 
     print(
-        "Number of cells:",
+        f"[{base_name}] Number of cells:",
         sum(len(row) for row in rows)
     )
 
     print(
-        "Cells per row:",
+        f"[{base_name}] Cells per row:",
         [len(row) for row in rows]
     )
 
@@ -231,13 +235,26 @@ def detect_table(image_path, output_dir="data/cells"):
 
 
 # ==================================================
-# Run the program
+# Run the program على أكثر من صورة
 # ==================================================
 
 if __name__ == "__main__":
 
-    image_path = "data/processed/image_denoised.png"
+    # ياخذ تلقائيًا كل الصور الموجودة فعليًا في المجلد
+    # (بدل ما نكتب أسماء يدوي ونضطر نتأكد كل مرة إنها موجودة)
+    image_paths = glob.glob("data/processed/*_denoised.png")
 
-    rows = detect_table(
-        image_path
-    )
+    if not image_paths:
+        print("لم يتم العثور على أي صور في data/processed/")
+
+    all_results = {}
+
+    for image_path in image_paths:
+
+        if not os.path.exists(image_path):
+            print(f"تخطي: الملف غير موجود -> {image_path}")
+            continue
+
+        rows = detect_table(image_path)
+
+        all_results[image_path] = rows
