@@ -137,5 +137,3 @@ if __name__ == "__main__":
     # مثال 2: معالجة كل صور مجلد كامل (فعّليه عند الحاجة)
     # results = process_folder("data/raw", pattern="*.jpg")
     # print(f"تمت معالجة {len(results)} صورة")
-
-    
