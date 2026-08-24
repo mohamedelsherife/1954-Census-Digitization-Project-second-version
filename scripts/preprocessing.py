@@ -29,4 +29,11 @@ def display(im_path):
 
 display(image_file)
 
+# to make image gray
+def grayscale(image):
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
+gray_image = grayscale(img)
+cv2.imwrite("data/processed/gray.jpg", gray_image)
+
+display("data/processed/gray.jpg")
