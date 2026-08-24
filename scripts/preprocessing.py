@@ -1,6 +1,6 @@
 import cv2
 from matplotlib import pyplot as plt
-
+import numpy as np
 image_file = "data/raw/1954-P000001_page-0001.jpg"
 img = cv2.imread(image_file)
 
@@ -54,6 +54,32 @@ im_bw = cv2.adaptiveThreshold(
 cv2.imwrite("data/processed/bw_image.jpg", im_bw)
 display("data/processed/bw_image.jpg")
 
-no_noise = cv2.medianBlur(im_bw, 3)
-cv2.imwrite("data/processed/no_noise.jpg", no_noise)
-display("data/processed/no_noise.jpg")
+
+
+# إزالة الضوضاء باستخدام Connected Components
+# (يشيل بس البقع الصغيرة جداً، ويحافظ بدقة على الحروف)
+# ============================================
+ 
+# نعيد تثبيت الصورة كثنائية صارمة (0 أو 255) لتفادي أي تدرّج رمادي
+# قد ينتج من ضغط JPEG - مهم جداً قبل استخدام connectedComponents
+_, im_bw_strict = cv2.threshold(im_bw, 127, 255, cv2.THRESH_BINARY)
+ 
+# نعكس الصورة مؤقتاً: النص أبيض على خلفية سودة
+# (connectedComponents يحسب المكونات المتصلة من البكسلات البيضاء)
+inverted = cv2.bitwise_not(im_bw_strict)
+n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inverted, connectivity=8)
+ 
+min_size = 4  # أقل مساحة (بالبكسل) نعتبرها جزء من نص حقيقي
+cleaned = np.zeros_like(inverted)
+for i in range(1, n_labels):
+    if stats[i, cv2.CC_STAT_AREA] >= min_size:
+        cleaned[labels == i] = 255
+ 
+denoised = cv2.bitwise_not(cleaned)  # نرجعها لوضعها الطبيعي (نص أسود على أبيض)
+ 
+# نحفظ بصيغة PNG (بدون فقدان جودة) للحفاظ على ثنائية الصورة
+cv2.imwrite("data/processed/denoised.png", denoised)
+display("data/processed/denoised.png")
+
+
+
