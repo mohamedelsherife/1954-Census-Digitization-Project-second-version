@@ -194,7 +194,7 @@ def crop_header_table(img_array, crops_template):
 
 def crop_folder(
     input_dir,
-    output_dir="data/croped",
+    output_dir="data/cropped",
     pattern="*.png",
     needs_split=None,
     split_offsets=None,
@@ -324,7 +324,7 @@ if __name__ == "__main__":
 
     crop_folder(
         input_dir="data/processed",
-        output_dir="data/croped",
+        output_dir="data/cropped",
         pattern="*_denoised.png",
         needs_split=needs_split,
         split_offsets=split_offsets,
