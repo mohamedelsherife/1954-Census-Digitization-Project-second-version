@@ -3,33 +3,182 @@ import numpy as np
 import os
 import glob
 
-def detect_table(image_path, output_dir="data/cells"):
+
+# =========================================================
+# Find line positions
+# =========================================================
+
+def find_horizontal_lines(horizontal_image):
     """
-    Detect rows, columns, and cells from a preprocessed/denoised image.
+    Find Y positions of horizontal table lines.
     """
 
-    # ==========================================
-    # 1. Read the preprocessed image
-    # ==========================================
+    # Sum white pixels for every row
+    row_sum = np.sum(
+        horizontal_image > 0,
+        axis=1
+    )
 
-    # (تم حذف السطر اللي كان يعمل override لـ image_path هنا،
-    #  عشان الدالة تشتغل على أي صورة تنبعتلها كباراميتر)
+    # Threshold
+    threshold = horizontal_image.shape[1] * 0.05
 
-    img = cv2.imread(image_path)
+    positions = np.where(
+        row_sum > threshold
+    )[0]
+
+    # Group nearby Y positions
+    lines = []
+
+    if len(positions) == 0:
+        return lines
+
+    start = positions[0]
+    previous = positions[0]
+
+    for position in positions[1:]:
+
+        if position - previous <= 5:
+
+            previous = position
+
+        else:
+
+            center = (start + previous) // 2
+
+            lines.append(center)
+
+            start = position
+            previous = position
+
+    # Last group
+    center = (start + previous) // 2
+
+    lines.append(center)
+
+    return lines
+
+
+# =========================================================
+# Find vertical line positions
+# =========================================================
+
+def find_vertical_lines(vertical_image):
+    """
+    Find X positions of vertical table lines.
+    """
+
+    # Sum white pixels for every column
+    column_sum = np.sum(
+        vertical_image > 0,
+        axis=0
+    )
+
+    # Threshold
+    threshold = vertical_image.shape[0] * 0.05
+
+    positions = np.where(
+        column_sum > threshold
+    )[0]
+
+    # Group nearby X positions
+    lines = []
+
+    if len(positions) == 0:
+        return lines
+
+    start = positions[0]
+    previous = positions[0]
+
+    for position in positions[1:]:
+
+        if position - previous <= 5:
+
+            previous = position
+
+        else:
+
+            center = (start + previous) // 2
+
+            lines.append(center)
+
+            start = position
+            previous = position
+
+    # Last group
+    center = (start + previous) // 2
+
+    lines.append(center)
+
+    return lines
+
+
+# =========================================================
+# Remove lines that are too close
+# =========================================================
+
+def merge_close_lines(lines, minimum_distance=15):
+    """
+    Merge line coordinates that are very close.
+    """
+
+    if not lines:
+        return []
+
+    lines = sorted(lines)
+
+    merged = [
+        lines[0]
+    ]
+
+    for line in lines[1:]:
+
+        if line - merged[-1] >= minimum_distance:
+
+            merged.append(line)
+
+        else:
+
+            # Average two close lines
+            merged[-1] = (
+                merged[-1] + line
+            ) // 2
+
+    return merged
+
+
+# =========================================================
+# Detect table
+# =========================================================
+
+def detect_table(
+    image_path,
+    output_dir="data/cells"
+):
+
+    # =====================================================
+    # 1. Read image
+    # =====================================================
+
+    img = cv2.imread(
+        image_path
+    )
 
     if img is None:
+
         raise FileNotFoundError(
             f"Could not read image: {image_path}"
         )
 
-    # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(
+        img,
+        cv2.COLOR_BGR2GRAY
+    )
 
     height, width = gray.shape
 
-    # ==========================================
-    # 2. Convert to binary
-    # ==========================================
+    # =====================================================
+    # 2. Threshold
+    # =====================================================
 
     _, binary = cv2.threshold(
         gray,
@@ -38,140 +187,279 @@ def detect_table(image_path, output_dir="data/cells"):
         cv2.THRESH_BINARY_INV
     )
 
-    # ==========================================
-    # 3. Detect horizontal lines
-    # ==========================================
+    # =====================================================
+    # 3. Horizontal lines
+    # =====================================================
+
+    horizontal_length = max(
+        20,
+        width // 50
+    )
 
     horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (width // 30, 1)
+        (
+            horizontal_length,
+            1
+        )
     )
 
-    horizontal_lines = cv2.morphologyEx(
+    horizontal = cv2.morphologyEx(
         binary,
         cv2.MORPH_OPEN,
         horizontal_kernel
     )
 
-    # ==========================================
-    # 4. Detect vertical lines
-    # ==========================================
+    # Repair horizontal gaps
+    horizontal_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (30, 3)
+    )
+
+    horizontal = cv2.morphologyEx(
+        horizontal,
+        cv2.MORPH_CLOSE,
+        horizontal_close_kernel
+    )
+
+    # =====================================================
+    # 4. Vertical lines
+    # =====================================================
+
+    vertical_length = max(
+        20,
+        height // 50
+    )
 
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (1, height // 30)
+        (
+            1,
+            vertical_length
+        )
     )
 
-    vertical_lines = cv2.morphologyEx(
+    vertical = cv2.morphologyEx(
         binary,
         cv2.MORPH_OPEN,
         vertical_kernel
     )
 
-    # ==========================================
-    # 5. Combine horizontal + vertical lines
-    # ==========================================
-
-    grid = cv2.add(
-        horizontal_lines,
-        vertical_lines
+    # Repair vertical gaps
+    vertical_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (3, 30)
     )
 
-    # Save grid image
-    os.makedirs(output_dir, exist_ok=True)
+    vertical = cv2.morphologyEx(
+        vertical,
+        cv2.MORPH_CLOSE,
+        vertical_close_kernel
+    )
 
-    # اسم الصورة بدون الامتداد، عشان نستخدمه في تسمية ملفات الإخراج
-    # فكل صورة تطلعلها ملفاتها الخاصة وما تتكتبش فوق بعض
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
+    # =====================================================
+    # 5. Combine lines
+    # =====================================================
+
+    grid = cv2.add(
+        horizontal,
+        vertical
+    )
+
+    # =====================================================
+    # 6. Output directory
+    # =====================================================
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    base_name = os.path.splitext(
+        os.path.basename(image_path)
+    )[0]
+
+    # =====================================================
+    # 7. Save grid
+    # =====================================================
 
     grid_path = os.path.join(
         output_dir,
         f"{base_name}_detected_grid.png"
     )
 
-    cv2.imwrite(grid_path, grid)
-
-    # ==========================================
-    # 6. Find contours
-    # ==========================================
-
-    contours, _ = cv2.findContours(
-        grid,
-        cv2.RETR_TREE,
-        cv2.CHAIN_APPROX_SIMPLE
+    cv2.imwrite(
+        grid_path,
+        grid
     )
 
-    # ==========================================
-    # 7. Get bounding boxes
-    # ==========================================
+    # =====================================================
+    # 8. Find horizontal line positions
+    # =====================================================
+
+    horizontal_positions = find_horizontal_lines(
+        horizontal
+    )
+
+    # =====================================================
+    # 9. Find vertical line positions
+    # =====================================================
+
+    vertical_positions = find_vertical_lines(
+        vertical
+    )
+
+    # =====================================================
+    # 10. Merge close horizontal lines
+    # =====================================================
+
+    horizontal_positions = merge_close_lines(
+        horizontal_positions,
+        minimum_distance=15
+    )
+
+    # =====================================================
+    # 11. Merge close vertical lines
+    # =====================================================
+
+    vertical_positions = merge_close_lines(
+        vertical_positions,
+        minimum_distance=15
+    )
+
+    # =====================================================
+    # 12. Print detected lines
+    # =====================================================
+
+    print()
+    print("=" * 60)
+
+    print(
+        "Horizontal lines:",
+        horizontal_positions
+    )
+
+    print(
+        "Vertical lines:",
+        vertical_positions
+    )
+
+    print(
+        "Number of horizontal lines:",
+        len(horizontal_positions)
+    )
+
+    print(
+        "Number of vertical lines:",
+        len(vertical_positions)
+    )
+
+    # =====================================================
+    # 13. Create bounding boxes
+    # =====================================================
 
     boxes = []
 
-    for contour in contours:
+    # Each two horizontal lines
+    # + two vertical lines
+    # = one cell
 
-        x, y, w, h = cv2.boundingRect(contour)
+    for row in range(
+        len(horizontal_positions) - 1
+    ):
 
-        # Ignore very small objects
-        if w < 20 or h < 20:
+        y1 = horizontal_positions[row]
+        y2 = horizontal_positions[row + 1]
+
+        cell_height = y2 - y1
+
+        # Ignore very small rows
+        if cell_height < 20:
             continue
 
-        # Ignore very large object
-        if w > width * 0.95 and h > height * 0.95:
-            continue
+        for column in range(
+            len(vertical_positions) - 1
+        ):
 
-        boxes.append((x, y, w, h))
+            x1 = vertical_positions[column]
+            x2 = vertical_positions[column + 1]
 
-    # ==========================================
-    # 8. Sort boxes by Y
-    # ==========================================
+            cell_width = x2 - x1
 
-    boxes.sort(key=lambda box: box[1])
+            # Ignore very small columns
+            if cell_width < 20:
+                continue
 
-    # ==========================================
-    # 9. Detect rows
-    # ==========================================
+            # Add small padding
+            padding = 2
+
+            x = x1 + padding
+            y = y1 + padding
+
+            w = (
+                x2 -
+                x1 -
+                padding * 2
+            )
+
+            h = (
+                y2 -
+                y1 -
+                padding * 2
+            )
+
+            boxes.append(
+                (
+                    x,
+                    y,
+                    w,
+                    h
+                )
+            )
+
+    # =====================================================
+    # 14. Create rows
+    # =====================================================
 
     rows = []
 
-    row_tolerance = 15
+    index = 0
 
-    for box in boxes:
-
-        x, y, w, h = box
-
-        added = False
-
-        for row in rows:
-
-            first_y = row[0][1]
-
-            if abs(y - first_y) < row_tolerance:
-
-                row.append(box)
-                added = True
-                break
-
-        if not added:
-            rows.append([box])
-
-    # ==========================================
-    # 10. Sort rows
-    # ==========================================
-
-    rows.sort(
-        key=lambda row: row[0][1]
+    number_of_rows = (
+        len(horizontal_positions) - 1
     )
 
-    # Sort cells inside each row by X
-    for row in rows:
+    number_of_columns = (
+        len(vertical_positions) - 1
+    )
 
-        row.sort(
-            key=lambda box: box[0]
-        )
+    for row_index in range(
+        number_of_rows
+    ):
 
-    # ==========================================
-    # 11. Draw bounding boxes
-    # ==========================================
+        row = []
+
+        for column_index in range(
+            number_of_columns
+        ):
+
+            if index < len(boxes):
+
+                row.append(
+                    boxes[index]
+                )
+
+            index += 1
+
+        if row:
+
+            rows.append(
+                row
+            )
+
+    # =====================================================
+    # 15. Draw bounding boxes
+    # =====================================================
 
     result_image = img.copy()
 
@@ -181,29 +469,69 @@ def detect_table(image_path, output_dir="data/cells"):
 
             x, y, w, h = box
 
-            # Draw bounding box
+            # ---------------------------------------------
+            # Bounding box
+            # ---------------------------------------------
+
             cv2.rectangle(
                 result_image,
                 (x, y),
-                (x + w, y + h),
+                (
+                    x + w,
+                    y + h
+                ),
                 (0, 0, 255),
                 2
             )
 
-            # Write row-column number
+            # ---------------------------------------------
+            # Label
+            # ---------------------------------------------
+
             cv2.putText(
                 result_image,
                 f"R{row_index} C{column_index}",
-                (x + 5, y + 20),
+                (
+                    x + 5,
+                    y + 20
+                ),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (255, 0, 0),
                 1
             )
 
-    # ==========================================
-    # 12. Save result
-    # ==========================================
+    # =====================================================
+    # 16. Draw detected line positions
+    # =====================================================
+
+    line_image = img.copy()
+
+    # Horizontal lines
+    for y in horizontal_positions:
+
+        cv2.line(
+            line_image,
+            (0, y),
+            (width, y),
+            (0, 255, 0),
+            2
+        )
+
+    # Vertical lines
+    for x in vertical_positions:
+
+        cv2.line(
+            line_image,
+            (x, 0),
+            (x, height),
+            (255, 0, 0),
+            2
+        )
+
+    # =====================================================
+    # 17. Save bounding boxes
+    # =====================================================
 
     result_path = os.path.join(
         output_dir,
@@ -215,46 +543,110 @@ def detect_table(image_path, output_dir="data/cells"):
         result_image
     )
 
-    # ==========================================
-    # 13. Print results
-    # ==========================================
+    # =====================================================
+    # 18. Save detected lines
+    # =====================================================
 
-    print(f"[{base_name}] Number of rows:", len(rows))
+    lines_path = os.path.join(
+        output_dir,
+        f"{base_name}_detected_lines.png"
+    )
+
+    cv2.imwrite(
+        lines_path,
+        line_image
+    )
+
+    # =====================================================
+    # 19. Print results
+    # =====================================================
 
     print(
-        f"[{base_name}] Number of cells:",
-        sum(len(row) for row in rows)
+        "Number of rows:",
+        len(rows)
     )
 
     print(
-        f"[{base_name}] Cells per row:",
-        [len(row) for row in rows]
+        "Number of cells:",
+        sum(
+            len(row)
+            for row in rows
+        )
+    )
+
+    print(
+        "Cells per row:",
+        [
+            len(row)
+            for row in rows
+        ]
+    )
+
+    print(
+        "Grid saved:",
+        grid_path
+    )
+
+    print(
+        "Lines saved:",
+        lines_path
+    )
+
+    print(
+        "Bounding boxes saved:",
+        result_path
+    )
+
+    print(
+        "=" * 60
     )
 
     return rows
 
 
-# ==================================================
-# Run the program على أكثر من صورة
-# ==================================================
+# =========================================================
+# MAIN
+# =========================================================
 
 if __name__ == "__main__":
 
-    # ياخذ تلقائيًا كل الصور الموجودة فعليًا في المجلد
-    # (بدل ما نكتب أسماء يدوي ونضطر نتأكد كل مرة إنها موجودة)
-    image_paths = glob.glob("data/processed/*_denoised.png")
+    # Find all denoised images
+    image_paths = glob.glob(
+        "data/processed/*_denoised.png"
+    )
 
     if not image_paths:
-        print("لم يتم العثور على أي صور في data/processed/")
 
+        print(
+            "لم يتم العثور على أي صور في "
+            "data/processed/"
+        )
+
+    # Store results
     all_results = {}
 
+    # Process every image
     for image_path in image_paths:
 
-        if not os.path.exists(image_path):
-            print(f"تخطي: الملف غير موجود -> {image_path}")
-            continue
+        print()
+        print(
+            "Processing:",
+            image_path
+        )
 
-        rows = detect_table(image_path)
+        try:
 
-        all_results[image_path] = rows
+            rows = detect_table(
+                image_path
+            )
+
+            all_results[
+                image_path
+            ] = rows
+
+        except Exception as e:
+
+            print(
+                f"Error processing "
+                f"{image_path}: {e}"
+            )
