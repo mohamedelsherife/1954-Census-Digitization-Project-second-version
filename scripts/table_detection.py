@@ -446,12 +446,22 @@ def detect_table(
 # =========================================================
 # 6. Run on all images
 # =========================================================
-# نجيب بس أجزاء الـ table (فيها الجريد)، مش الـ header
-# (بدّل الـ pattern لو تحب تعالج الـ header زادة)
+# نفس الأصل: نجيب أجزاء الـ table (فيها الجريد)
+# + نضيف بس ملف الـ header الوحيد (بدون تقسيم يمين/يسار)
+# زي 1954-P000002_page-0001_denoised_header_part.png
+# وما ناخذوش left_header_part / right_header_part
 
 if __name__ == "__main__":
 
-    image_paths = glob.glob("data/cropped/*_table_part.png")
+    table_paths = glob.glob("data/cropped/*_table_part.png")
+
+    header_paths = [
+        path for path in glob.glob("data/cropped/*header_part.png")
+        if "left_header_part" not in path
+        and "right_header_part" not in path
+    ]
+
+    image_paths = table_paths + header_paths
 
     if not image_paths:
 
