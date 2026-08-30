@@ -3,33 +3,210 @@ import numpy as np
 import os
 import glob
 
-def detect_table(image_path, output_dir="data/cells"):
-    """
-    Detect rows, columns, and cells from a preprocessed/denoised image.
-    """
 
-    # ==========================================
-    # 1. Read the preprocessed image
-    # ==========================================
+# =========================================================
+# 0. تصحيح الميلان (Deskew) - جديد
+# =========================================================
+# لازم قبل أي كشف خطوط، خصوصا للصفحة الي فيها ميلان (اليسار)
+# لأن كشف الخطوط الأفقية/العمودية يعتمد على projection سطر بسطر
+# وأي ميلان بسيط يخرب الحسبة كاملة.
 
-    # (تم حذف السطر اللي كان يعمل override لـ image_path هنا،
-    #  عشان الدالة تشتغل على أي صورة تنبعتلها كباراميتر)
+def deskew_image(image):
 
-    img = cv2.imread(image_path)
+    gray = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2GRAY
+    )
 
-    if img is None:
-        raise FileNotFoundError(
-            f"Could not read image: {image_path}"
-        )
+    gray = cv2.bitwise_not(gray)
 
-    # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY | cv2.THRESH_OTSU
+    )
 
-    height, width = gray.shape
+    coords = np.column_stack(
+        np.where(thresh > 0)
+    )
 
-    # ==========================================
-    # 2. Convert to binary
-    # ==========================================
+    if len(coords) == 0:
+        return image
+
+    angle = cv2.minAreaRect(coords)[-1]
+
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+
+    # لو الزاوية كبيرة برشا، غالبا كشف خاطئ مش ميلان حقيقي
+    # نتجاهلها ونرجع الصورة الأصلية بدل ما نخربها
+    if abs(angle) > 15:
+        return image
+
+    (h, w) = image.shape[:2]
+    center = (w // 2, h // 2)
+
+    M = cv2.getRotationMatrix2D(
+        center,
+        angle,
+        1.0
+    )
+
+    rotated = cv2.warpAffine(
+        image,
+        M,
+        (w, h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE
+    )
+
+    return rotated
+
+
+# =========================================================
+# 1. Find horizontal line positions
+# =========================================================
+
+def find_horizontal_lines(horizontal):
+
+    row_sum = np.sum(
+        horizontal > 0,
+        axis=1
+    )
+
+    threshold = horizontal.shape[1] * 0.05
+
+    positions = np.where(
+        row_sum > threshold
+    )[0]
+
+    lines = []
+
+    if len(positions) == 0:
+        return lines
+
+    start = positions[0]
+    previous = positions[0]
+
+    for position in positions[1:]:
+
+        if position - previous <= 5:
+
+            previous = position
+
+        else:
+
+            center = (start + previous) // 2
+
+            lines.append(center)
+
+            start = position
+            previous = position
+
+    center = (start + previous) // 2
+    lines.append(center)
+
+    return lines
+
+
+# =========================================================
+# 2. Find vertical line positions
+# =========================================================
+
+def find_vertical_lines(vertical):
+
+    column_sum = np.sum(
+        vertical > 0,
+        axis=0
+    )
+
+    threshold = vertical.shape[0] * 0.05
+
+    positions = np.where(
+        column_sum > threshold
+    )[0]
+
+    lines = []
+
+    if len(positions) == 0:
+        return lines
+
+    start = positions[0]
+    previous = positions[0]
+
+    for position in positions[1:]:
+
+        if position - previous <= 5:
+
+            previous = position
+
+        else:
+
+            center = (start + previous) // 2
+
+            lines.append(center)
+
+            start = position
+            previous = position
+
+    center = (start + previous) // 2
+    lines.append(center)
+
+    return lines
+
+
+# =========================================================
+# 3. Merge close lines
+# =========================================================
+
+def merge_close_lines(
+    lines,
+    minimum_distance=15
+):
+
+    if not lines:
+        return []
+
+    lines = sorted(lines)
+
+    merged = [
+        lines[0]
+    ]
+
+    for line in lines[1:]:
+
+        if line - merged[-1] >= minimum_distance:
+
+            merged.append(line)
+
+        else:
+
+            merged[-1] = (
+                merged[-1] + line
+            ) // 2
+
+    return merged
+
+
+# =========================================================
+# 4. Process ONE region (بدون تغيير عن الأصل)
+# =========================================================
+
+def detect_region(
+    region,
+    region_name,
+    output_dir
+):
+
+    height, width = region.shape[:2]
+
+    gray = cv2.cvtColor(
+        region,
+        cv2.COLOR_BGR2GRAY
+    )
 
     _, binary = cv2.threshold(
         gray,
@@ -38,223 +215,269 @@ def detect_table(image_path, output_dir="data/cells"):
         cv2.THRESH_BINARY_INV
     )
 
-    # ==========================================
-    # 3. Detect horizontal lines
-    # ==========================================
+    horizontal_length = max(
+        15,
+        width // 50
+    )
 
     horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (width // 30, 1)
+        (
+            horizontal_length,
+            1
+        )
     )
 
-    horizontal_lines = cv2.morphologyEx(
+    horizontal = cv2.morphologyEx(
         binary,
         cv2.MORPH_OPEN,
         horizontal_kernel
     )
 
-    # ==========================================
-    # 4. Detect vertical lines
-    # ==========================================
+    horizontal_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (30, 3)
+    )
+
+    horizontal = cv2.morphologyEx(
+        horizontal,
+        cv2.MORPH_CLOSE,
+        horizontal_close_kernel
+    )
+
+    vertical_length = max(
+        15,
+        height // 50
+    )
 
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (1, height // 30)
+        (
+            1,
+            vertical_length
+        )
     )
 
-    vertical_lines = cv2.morphologyEx(
+    vertical = cv2.morphologyEx(
         binary,
         cv2.MORPH_OPEN,
         vertical_kernel
     )
 
-    # ==========================================
-    # 5. Combine horizontal + vertical lines
-    # ==========================================
+    vertical_close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (3, 30)
+    )
+
+    vertical = cv2.morphologyEx(
+        vertical,
+        cv2.MORPH_CLOSE,
+        vertical_close_kernel
+    )
 
     grid = cv2.add(
-        horizontal_lines,
-        vertical_lines
+        horizontal,
+        vertical
     )
 
-    # Save grid image
-    os.makedirs(output_dir, exist_ok=True)
-
-    # اسم الصورة بدون الامتداد، عشان نستخدمه في تسمية ملفات الإخراج
-    # فكل صورة تطلعلها ملفاتها الخاصة وما تتكتبش فوق بعض
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-
-    grid_path = os.path.join(
-        output_dir,
-        f"{base_name}_detected_grid.png"
+    horizontal_positions = find_horizontal_lines(
+        horizontal
     )
 
-    cv2.imwrite(grid_path, grid)
-
-    # ==========================================
-    # 6. Find contours
-    # ==========================================
-
-    contours, _ = cv2.findContours(
-        grid,
-        cv2.RETR_TREE,
-        cv2.CHAIN_APPROX_SIMPLE
+    vertical_positions = find_vertical_lines(
+        vertical
     )
 
-    # ==========================================
-    # 7. Get bounding boxes
-    # ==========================================
+    horizontal_positions = merge_close_lines(
+        horizontal_positions,
+        15
+    )
+
+    vertical_positions = merge_close_lines(
+        vertical_positions,
+        15
+    )
+
+    print()
+    print("-" * 50)
+    print(f"{region_name} horizontal lines:", len(horizontal_positions))
+    print(f"{region_name} vertical lines:", len(vertical_positions))
+    print(f"{region_name} horizontal positions:", horizontal_positions)
+    print(f"{region_name} vertical positions:", vertical_positions)
 
     boxes = []
 
-    for contour in contours:
+    for row in range(
+        len(horizontal_positions) - 1
+    ):
 
-        x, y, w, h = cv2.boundingRect(contour)
+        y1 = horizontal_positions[row]
+        y2 = horizontal_positions[row + 1]
 
-        # Ignore very small objects
-        if w < 20 or h < 20:
+        cell_height = y2 - y1
+
+        if cell_height < 20:
             continue
 
-        # Ignore very large object
-        if w > width * 0.95 and h > height * 0.95:
-            continue
+        for column in range(
+            len(vertical_positions) - 1
+        ):
 
-        boxes.append((x, y, w, h))
+            x1 = vertical_positions[column]
+            x2 = vertical_positions[column + 1]
 
-    # ==========================================
-    # 8. Sort boxes by Y
-    # ==========================================
+            cell_width = x2 - x1
 
-    boxes.sort(key=lambda box: box[1])
+            if cell_width < 20:
+                continue
 
-    # ==========================================
-    # 9. Detect rows
-    # ==========================================
+            padding = 2
 
-    rows = []
+            x = x1 + padding
+            y = y1 + padding
+            w = x2 - x1 - 2 * padding
+            h = y2 - y1 - 2 * padding
 
-    row_tolerance = 15
+            boxes.append((x, y, w, h))
 
-    for box in boxes:
+    result = region.copy()
+
+    for index, box in enumerate(boxes):
 
         x, y, w, h = box
 
-        added = False
-
-        for row in rows:
-
-            first_y = row[0][1]
-
-            if abs(y - first_y) < row_tolerance:
-
-                row.append(box)
-                added = True
-                break
-
-        if not added:
-            rows.append([box])
-
-    # ==========================================
-    # 10. Sort rows
-    # ==========================================
-
-    rows.sort(
-        key=lambda row: row[0][1]
-    )
-
-    # Sort cells inside each row by X
-    for row in rows:
-
-        row.sort(
-            key=lambda box: box[0]
+        cv2.rectangle(
+            result,
+            (x, y),
+            (x + w, y + h),
+            (0, 0, 255),
+            2
         )
 
-    # ==========================================
-    # 11. Draw bounding boxes
-    # ==========================================
+        columns = max(
+            1,
+            len(vertical_positions) - 1
+        )
 
-    result_image = img.copy()
+        row_index = index // columns
+        column_index = index % columns
 
-    for row_index, row in enumerate(rows):
+        cv2.putText(
+            result,
+            f"R{row_index} C{column_index}",
+            (x + 5, y + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 0, 0),
+            1
+        )
 
-        for column_index, box in enumerate(row):
+    line_image = region.copy()
 
-            x, y, w, h = box
+    for y in horizontal_positions:
+        cv2.line(line_image, (0, y), (width, y), (0, 255, 0), 2)
 
-            # Draw bounding box
-            cv2.rectangle(
-                result_image,
-                (x, y),
-                (x + w, y + h),
-                (0, 0, 255),
-                2
-            )
+    for x in vertical_positions:
+        cv2.line(line_image, (x, 0), (x, height), (255, 0, 0), 2)
 
-            # Write row-column number
-            cv2.putText(
-                result_image,
-                f"R{row_index} C{column_index}",
-                (x + 5, y + 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 0, 0),
-                1
-            )
+    grid_path = os.path.join(output_dir, f"{region_name}_grid.png")
+    lines_path = os.path.join(output_dir, f"{region_name}_lines.png")
+    boxes_path = os.path.join(output_dir, f"{region_name}_bounding_boxes.png")
 
-    # ==========================================
-    # 12. Save result
-    # ==========================================
+    cv2.imwrite(grid_path, grid)
+    cv2.imwrite(lines_path, line_image)
+    cv2.imwrite(boxes_path, result)
 
-    result_path = os.path.join(
-        output_dir,
-        f"{base_name}_detected_cells.png"
+    print(f"{region_name} bounding boxes:", len(boxes))
+    print(f"Saved: {boxes_path}")
+
+    return boxes
+
+
+# =========================================================
+# 5. Main table detection - معدّلة
+# =========================================================
+# التقسيم يمين/يسار وheader/table توا مسوّيه زميلك مسبقا
+# في مجلد data/cropped، فمانحتاجوش نقسم الصورة هنا مرة ثانية.
+# كل صورة داخلة هنا هي جزء واحد جاهز (مثلا ..._left_table_part.png)
+
+def detect_table(
+    image_path,
+    output_dir="data/cells"
+):
+
+    img = cv2.imread(image_path)
+
+    if img is None:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+
+    # تصحيح الميلان قبل أي كشف خطوط
+    img = deskew_image(img)
+
+    height, width = img.shape[:2]
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    base_name = os.path.splitext(
+        os.path.basename(image_path)
+    )[0]
+
+    print()
+    print("=" * 60)
+    print("Original image:", image_path)
+    print("Image width:", width)
+    print("Image height:", height)
+
+    boxes = detect_region(
+        img,
+        base_name,
+        output_dir
     )
 
-    cv2.imwrite(
-        result_path,
-        result_image
-    )
+    print()
+    print("=" * 60)
+    print("FINAL RESULT")
+    print(f"{base_name} boxes:", len(boxes))
+    print("=" * 60)
 
-    # ==========================================
-    # 13. Print results
-    # ==========================================
-
-    print(f"[{base_name}] Number of rows:", len(rows))
-
-    print(
-        f"[{base_name}] Number of cells:",
-        sum(len(row) for row in rows)
-    )
-
-    print(
-        f"[{base_name}] Cells per row:",
-        [len(row) for row in rows]
-    )
-
-    return rows
+    return boxes
 
 
-# ==================================================
-# Run the program على أكثر من صورة
-# ==================================================
+# =========================================================
+# 6. Run on all images
+# =========================================================
+# نفس الأصل: نجيب أجزاء الـ table (فيها الجريد)
+# + نضيف بس ملف الـ header الوحيد (بدون تقسيم يمين/يسار)
+# زي 1954-P000002_page-0001_denoised_header_part.png
+# وما ناخذوش left_header_part / right_header_part
 
 if __name__ == "__main__":
 
-    # ياخذ تلقائيًا كل الصور الموجودة فعليًا في المجلد
-    # (بدل ما نكتب أسماء يدوي ونضطر نتأكد كل مرة إنها موجودة)
-    image_paths = glob.glob("data/processed/*_denoised.png")
+    table_paths = glob.glob("data/cropped/*_table_part.png")
+
+    header_paths = [
+        path for path in glob.glob("data/cropped/*header_part.png")
+        if "left_header_part" not in path
+        and "right_header_part" not in path
+    ]
+
+    image_paths = table_paths + header_paths
 
     if not image_paths:
-        print("لم يتم العثور على أي صور في data/processed/")
 
-    all_results = {}
+        print(
+            "لم يتم العثور على أي صور في "
+            "data/cropped/"
+        )
 
     for image_path in image_paths:
 
-        if not os.path.exists(image_path):
-            print(f"تخطي: الملف غير موجود -> {image_path}")
-            continue
+        try:
 
-        rows = detect_table(image_path)
+            detect_table(image_path)
 
-        all_results[image_path] = rows
+        except Exception as e:
+
+            print()
+            print(f"Error processing {image_path}:")
+            print(e)

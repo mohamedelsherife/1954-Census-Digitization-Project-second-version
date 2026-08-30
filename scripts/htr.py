@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """
 htr.py — الاتصال الفعلي بموديل Kraken (Muharaf)
 ====================================================
@@ -99,3 +100,7 @@ def predict_cell_text(cell_crop):
     prediction = rpred(htr_model, pil_img, bounds)
     recognized_text = "".join([rec.prediction for rec in prediction])
     return recognized_text.strip()
+=======
+from transformers import pipeline
+classefier = pipeline()
+>>>>>>> 2b9bb2cc0fc630c64ee6527de8772b38b7c16856
