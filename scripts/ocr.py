@@ -1,16 +1,15 @@
 import pytesseract
 from PIL import Image
 
-# بدل ما تقرأ الصورة كاملة، اقرأ كل خانة على حدة
-regions = {
-    "city_name": (1750, 250, 2100, 300),   # (left, top, right, bottom) تقريبية
-    "center_name": (1500, 250, 1750, 300),
-    "village_name": (1250, 250, 1500, 300),
-}
+image = Image.open("data/cropped/1954-P000002_page-0001_denoised_header_part.png")
 
-img = Image.open("data/cropped/1954-P000002_page-0001_denoised_header_part.png")
+text = pytesseract.image_to_string(
+    image,
+    lang="ara",
+    config="--psm 4"
+)
 
-for name, box in regions.items():
-    cropped = img.crop(box)
-    text = pytesseract.image_to_string(cropped, lang="ara", config="--psm 7")
-    print(f"{name}: {text.strip()}")
+with open("output/ocr/ocr_result.txt", "w", encoding="utf-8") as file:
+    file.write(text)
+
+print("OCR completed!")
