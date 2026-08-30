@@ -1,77 +1,71 @@
 """
-Table Transformer (TATR) — استخراج صفوف وأعمدة الجدول
+تحويل نتيجة TATR (صفوف + أعمدة منفصلين) لصناديق خلايا فعلية (نسخة محسّنة)
 ====================================================================
-يشتغل على جهازكم (يحتاج انترنت وقت أول تشغيل بس، لتحميل الموديل).
+TATR يرجّع صندوق لكل صف كامل وصندوق لكل عمود كامل، مو خلية مباشرة —
+هذا الملف يحسب تقاطعاتهم عشان نطلع بصندوق (خلية) واحد لكل تقاطع صف×عمود.
 
-المتطلبات:
-    pip install transformers torch pillow
+الفرق عن النسخة القديمة: نشتغل الآن على "قصة الجدول" الناتجة من
+detect_table() مباشرة (numpy/PIL) بدل ما نعاود نقرأ الصورة الأصلية —
+هذا يخلي صناديق الخلايا متطابقة تماماً مع نفس الصورة اللي شغّلنا عليها
+موديل الـ structure، فتجيكم المعاينة البصرية مطابقة صح.
 """
 
-from transformers import AutoImageProcessor, TableTransformerForObjectDetection
-from PIL import Image
-import torch
-
-MODEL_NAME = "microsoft/table-transformer-structure-recognition-v1.1-all"
-
-print("جاري تحميل TATR (أول مرة فقط)...")
-processor = AutoImageProcessor.from_pretrained(
-    MODEL_NAME,
-    size={"shortest_edge": 800, "longest_edge": 1333},
-)
-model = TableTransformerForObjectDetection.from_pretrained(MODEL_NAME)
-print("تم التحميل.\n")
+import numpy as np
+import cv2
+from tatr_structure import detect_table, detect_structure, separate_rows_and_columns
 
 
-def detect_structure(image_path, confidence_threshold=0.7):
+def build_cells_from_tatr(rows, columns):
     """
-    يرجع قائمة عناصر، كل عنصر فيه:
-        {"label": "table row" | "table column" | ..., "score": float, "box": [x0,y0,x1,y1]}
+    كل خلية = تقاطع مستطيل الصف مع مستطيل العمود.
+    نرجع: قائمة (row_idx, col_idx, x0, y0, x1, y1)
     """
-    image = Image.open(image_path).convert("RGB")
-
-    inputs = processor(images=image, return_tensors="pt")
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    # target_sizes بترتيب (height, width) — عكس PIL.size اللي يرجع (width, height)
-    target_sizes = torch.tensor([image.size[::-1]])
-    results = processor.post_process_object_detection(
-        outputs, threshold=confidence_threshold, target_sizes=target_sizes
-    )[0]
-
-    detections = []
-    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-        detections.append({
-            "label": model.config.id2label[label.item()],
-            "score": round(score.item(), 3),
-            "box": [round(v, 1) for v in box.tolist()],  # [x0, y0, x1, y1]
-        })
-    return detections
+    cells = []
+    for r_idx, row in enumerate(rows):
+        _, ry0, _, ry1 = row["box"]
+        for c_idx, col in enumerate(columns):
+            cx0, _, cx1, _ = col["box"]
+            cells.append((r_idx, c_idx, cx0, ry0, cx1, ry1))
+    return cells
 
 
-def separate_rows_and_columns(detections):
-    """يفرز النتائج لصفوف وأعمدة بمفردهم، مرتبين حسب الموقع"""
-    rows = [d for d in detections if d["label"] == "table row"]
-    columns = [d for d in detections if d["label"] == "table column"]
+def visualize(pil_image, rows, columns, output_path="tatr_preview.png"):
+    """يرسم الصفوف (أخضر) والأعمدة (أزرق) فوق صورة قصة الجدول نفسها"""
+    img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    for row in rows:
+        x0, y0, x1, y1 = map(int, row["box"])
+        cv2.rectangle(img, (x0, y0), (x1, y1), (0, 255, 0), 2)  # أخضر = صفوف
+    for col in columns:
+        x0, y0, x1, y1 = map(int, col["box"])
+        cv2.rectangle(img, (x0, y0), (x1, y1), (255, 0, 0), 2)  # أزرق = أعمدة
+    cv2.imwrite(output_path, img)
+    print(f"تم حفظ المعاينة البصرية: {output_path}")
+    print("راجعوها بعينكم — قارنوها مع نتيجة OpenCV اللي عندنا من قبل")
 
-    rows.sort(key=lambda d: d["box"][1])   # رتبوهم عمودياً (y0)
-    columns.sort(key=lambda d: d["box"][0])  # رتبوهم أفقياً (x0)
-    return rows, columns
+
+def visualize_cells(pil_image, cells, output_path="tatr_cells_preview.png"):
+    """اختياري: يرسم كل خلية لحالها، مفيد للتأكد إن التقاطعات صح"""
+    img = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    for (r_idx, c_idx, x0, y0, x1, y1) in cells:
+        cv2.rectangle(img, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 1)
+    cv2.imwrite(output_path, img)
+    print(f"تم حفظ معاينة الخلايا: {output_path}")
 
 
 if __name__ == "__main__":
-    # ===== عدّلوا هذا لمسار صورة الجدول عندكم (نفس الصورة اللي رفعتوها لي) =====
-    IMAGE_PATH = "1954-P000002_page-0001_denoised_table_part.png"
+    # ===== مسار صورتكم (نفس المسار اللي بملف tatr_structure.py) =====
+    IMAGE_PATH = r"C:\Users\VICTUS\1954-Census-Digitization-Project-second-version\data\processed\1954-P000002_page-0001_denoised.png"
 
-    detections = detect_structure(IMAGE_PATH, confidence_threshold=0.7)
+    # المرحلة 1: اكتشاف الجدول وقصه (وتكبيره لو صغير) — نفس القصة تُستخدم بعدين للرسم
+    table_crop, off_x, off_y, scale = detect_table(IMAGE_PATH, threshold=0.7)
+
+    # المرحلة 2: اكتشاف الصفوف/الأعمدة على القصة فقط
+    detections = detect_structure(table_crop, confidence_threshold=0.5)
     rows, columns = separate_rows_and_columns(detections)
 
-    print(f"عدد الصفوف المكتشفة: {len(rows)}")
-    print(f"عدد الأعمدة المكتشفة: {len(columns)}")
+    visualize(table_crop, rows, columns)
 
-    # اطبعوا كل صف/عمود مع درجة الثقة (score) — راجعوها، لو أقل من 0.7
-    # غالباً غلط أو تكرار
-    for r in rows:
-        print(f"  صف: y={r['box'][1]}-{r['box'][3]}  ثقة={r['score']}")
-    for c in columns:
-        print(f"  عمود: x={c['box'][0]}-{c['box'][2]}  ثقة={c['score']}")
+    cells = build_cells_from_tatr(rows, columns)
+    print(f"إجمالي الخلايا الناتجة: {len(cells)}")
+
+    visualize_cells(table_crop, cells)
