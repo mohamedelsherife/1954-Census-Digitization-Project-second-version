@@ -165,6 +165,198 @@ def split_left_right(img_array, mid_offset=0):
     return left_half, right_half
 
 
+def crop_top_margin(img_array, cutoff_y):
+    """
+    يقص شريط من اعلى الصورة (مثلا لازالة اثر طية/تمزق حافة الورقة
+    الظاهر فوق الجدول، واللي مش جزء من بيانات الكشف نفسها).
+
+    - cutoff_y: كل حاجة فوق السطر ده هتتقص وتتشال، وكل حاجة من السطر ده لتحت هتفضل زي ما هي
+
+    ملحوظة: القيمة دي بتختلف من صورة لصورة حسب مكان الطية، فينفع تحددها
+    يدويا لكل صورة (باستخدام show_with_grid لتحديد الاحداثية بالعين),
+    او تسيبها 0 لو الصورة مفيهاش طية اصلا.
+    """
+    h, w = img_array.shape[:2]
+    cutoff_y = max(0, min(cutoff_y, h))
+    return crop_image(img_array, top=cutoff_y, bottom=h, left=0, right=w)
+
+
+def enhance_clarity(img_array, scale=4.0, sharpen_amount=1.5, blur_sigma=1.3):
+    """
+    يوضح الكلام في الصورة (خصوصا الخط اليدوي الصغير) عن طريق:
+    1) تكبير الصورة (Upscale) باستخدام INTER_LANCZOS4 - بيحافظ على حواف
+       الحروف بدقة اعلى من INTER_CUBIC على الصور الثنائية اللون (ابيض/اسود)
+       زي دي، ومبيدّيش الشكل المتعرج (jagged/staircase) اللي بيظهر مع CUBIC
+    2) شحذ خفيف (Unsharp Masking) - بيخلي الحروف وخطوط الجدول ابين واوضح
+       من غير ما يبالغ ويدي هالة (halo) حوالين الحروف
+
+    Parameters:
+    - scale: معامل التكبير (4.0 = تكبير الصورة لـ 4 اضعاف حجمها - افضل توازن
+             بين الوضوح وحجم الملف الناتج بعد التجربة على عينات فعلية)
+    - sharpen_amount: قوة الشحذ (اكبر = شحذ اقوى؛ القيمة الافتراضية 1.5 مجربة
+                      ومناسبة لتفادي الهالات حوالين الحروف)
+    - blur_sigma: درجة التمويه المستخدمة كأساس لعملية unsharp masking
+
+    Returns: الصورة بعد التكبير والشحذ (بنفس عدد القنوات - grayscale او ملونة)
+    """
+    h, w = img_array.shape[:2]
+    new_size = (int(w * scale), int(h * scale))
+
+    upscaled = cv2.resize(img_array, new_size, interpolation=cv2.INTER_LANCZOS4)
+
+    blurred = cv2.GaussianBlur(upscaled, (0, 0), sigmaX=blur_sigma)
+    sharpened = cv2.addWeighted(upscaled, sharpen_amount, blurred, -(sharpen_amount - 1.0), 0)
+
+    return sharpened
+
+
+# ============================================================
+# ===============  دوال تصحيح الميلان (Deskew)  ===============
+# ============================================================
+
+def detect_skew_angle(img_array, angle_limit=15, canny_low=50, canny_high=150,
+                       hough_threshold=200, min_line_length_ratio=0.25):
+    """
+    يكتشف زاوية ميلان الصورة اعتماداً على خطوط الجدول (وليس النص).
+
+    الفكرة:
+    - نستخدم Canny لايجاد الحواف
+    - نستخدم HoughLinesP لايجاد الخطوط المستقيمة (خطوط الجدول)
+    - نحسب زاوية كل خط، ونستبعد الخطوط اللي زاويتها بعيدة اوي عن الافقي/الرأسي
+      (عشان منتأثرش بخطوط حواف الورقة الممزقة او كلام مكتوب بخط مايل)
+    - نرجع متوسط (median) الزوايا القريبة من الافقي كزاوية التصحيح
+
+    Parameters:
+    - angle_limit: اقصى زاوية ميلان متوقعة (بالدرجات) - أي خط زاويته اكبر من كده يتجاهل
+    - min_line_length_ratio: اقل طول للخط (نسبة من عرض الصورة) عشان يتحسب
+                             (خطوط الجدول الافقية عادة طويلة)
+
+    Returns: angle (float) بالدرجات. موجب = ميل عكس عقارب الساعة, سالب = مع عقارب الساعة
+             لو مفيش خطوط كافية اتلاقت, بيرجع 0.0
+    """
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_array.copy()
+
+    h, w = gray.shape[:2]
+    min_line_length = int(w * min_line_length_ratio)
+
+    edges = cv2.Canny(gray, canny_low, canny_high, apertureSize=3)
+
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=hough_threshold,
+        minLineLength=min_line_length,
+        maxLineGap=20,
+    )
+
+    if lines is None or len(lines) == 0:
+        print("  !! لم يتم العثور على خطوط كافية لتحديد الميلان - سيتم تجاهل التصحيح")
+        return 0.0
+
+    angles = []
+    weights = []
+    for line in lines:
+        # بعض نسخ OpenCV بترجع شكل الخط كـ [[x1,y1,x2,y2]] وبعضها [x1,y1,x2,y2]
+        # نستخدم reshape(-1) عشان نضمن ان الشكل دايما flat مهما كانت النسخة
+        x1, y1, x2, y2 = np.asarray(line).reshape(-1)
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0:
+            continue
+        angle = np.degrees(np.arctan2(dy, dx))
+        length = float(np.hypot(dx, dy))
+
+        # نهتم فقط بالخطوط القريبة من الافقي (خطوط الجدول الافقية)
+        if abs(angle) <= angle_limit:
+            angles.append(angle)
+            weights.append(length)
+
+    if not angles:
+        print("  !! لم يتم العثور على خطوط افقية واضحة - سيتم تجاهل التصحيح")
+        return 0.0
+
+    # نستخدم "weighted median" بدل median العادي:
+    # الخطوط الطويلة (زي حدود الجدول الحقيقية) توزنها اكبر من الخطوط القصيرة
+    # (زي خطوط طيات/تمزقات حواف الورقة اللي ممكن تكون بزاوية مختلفة تماما
+    # وتخدع median العادي رغم انها قصيرة وغير موثوقة)
+    angles = np.array(angles)
+    weights = np.array(weights)
+
+    order = np.argsort(angles)
+    angles_sorted = angles[order]
+    weights_sorted = weights[order]
+    cum_weights = np.cumsum(weights_sorted)
+    cutoff = weights_sorted.sum() / 2.0
+    idx = np.searchsorted(cum_weights, cutoff)
+    idx = min(idx, len(angles_sorted) - 1)
+
+    weighted_median_angle = float(angles_sorted[idx])
+    return weighted_median_angle
+
+
+def rotate_image(img_array, angle, border_value=255):
+    """
+    يدور الصورة بزاوية معينة حول مركزها، مع الحفاظ على كل الصورة
+    (توسيع الابعاد لو لزم الامر عشان محدش يتقص من الاطراف).
+
+    - border_value: لون الحواف الجديدة الناتجة عن الدوران (255 = ابيض, مناسب للصور بعد denoise)
+    """
+    h, w = img_array.shape[:2]
+    center = (w // 2, h // 2)
+
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    # حساب الابعاد الجديدة عشان الصورة متتقصش من الاطراف بعد الدوران
+    cos = np.abs(rotation_matrix[0, 0])
+    sin = np.abs(rotation_matrix[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+
+    # تعديل مصفوفة الدوران عشان تاخد في الاعتبار الابعاد الجديدة
+    rotation_matrix[0, 2] += (new_w / 2) - center[0]
+    rotation_matrix[1, 2] += (new_h / 2) - center[1]
+
+    rotated = cv2.warpAffine(
+        img_array,
+        rotation_matrix,
+        (new_w, new_h),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=border_value,
+    )
+
+    return rotated
+
+
+def deskew_image(img_array, angle_limit=15, min_angle_to_apply=0.1, show_angle=True):
+    """
+    الدالة الرئيسية للتصحيح: تكتشف زاوية الميلان وتصححها.
+
+    - min_angle_to_apply: لو الزاوية المكتشفة اصغر من كده، متعملش دوران خالص
+                          (عشان منضيعش جودة الصورة بدوران غير ضروري لزاوية شبه معدومة)
+
+    Returns: img_array بعد التصحيح (او نفس الصورة لو الزاوية صغيرة جدا او متلاقتش)
+    """
+    angle = detect_skew_angle(img_array, angle_limit=angle_limit)
+
+    if show_angle:
+        print(f"  زاوية الميلان المكتشفة: {angle:.2f} درجة")
+
+    if abs(angle) < min_angle_to_apply:
+        return img_array
+
+    return rotate_image(img_array, angle)
+
+
+# ============================================================
+# =====================  نهاية دوال Deskew  ===================
+# ============================================================
+
+
 def crop_header_table(img_array, crops_template):
     """
     يقص صورة واحدة (سواء صفحة كاملة او نصف صفحة) الى اجزائها
@@ -200,15 +392,23 @@ def crop_folder(
     split_offsets=None,
     custom_crops=None,
     default_crops=None,
+    apply_deskew=True,
+    top_margin_crops=None,
+    apply_enhance=False,
+    enhance_scale=2.0,
 ):
     """
     Pipeline كامل للقص، بيتعامل مع كل صورة حسب حالتها:
 
     1) لو اسم الصورة موجود في needs_split (وقيمته True):
        - يقسمها الاول يمين/يسار (split_left_right)
+       - يشيل شريط اعلى الصورة لو محدد في top_margin_crops (لازالة اثر طية/تمزق)
+       - يصحح ميلان كل نصف على حدة (deskew_image) [لو apply_deskew=True]
        - وبعدين يقص كل نصف لـ header_part / table_part (او اي اجزاء تانية)
 
     2) لو الصورة مش محتاجة قص يمين/يسار (مش موجودة في needs_split، او قيمتها False):
+       - يشيل شريط اعلى الصورة لو محدد في top_margin_crops
+       - يصحح ميلان الصورة كاملة [لو apply_deskew=True]
        - يقص الصورة الكاملة مباشرة لـ header_part / table_part
 
     Parameters:
@@ -219,6 +419,18 @@ def crop_folder(
     - custom_crops: dict {اسم_الصورة_بدون_الامتداد: crops_template}
                      احداثيات مخصصة لقص header/table لصورة (او نصف صورة) معينة
     - default_crops: crops_template افتراضي لأي صورة/نصف مش موجود في custom_crops
+    - apply_deskew: لو True، يصحح ميلان كل جزء (بعد split, قبل crop_header_table)
+    - top_margin_crops: dict {اسم_الجزء: cutoff_y}
+                        بيشيل شريط من اعلى الجزء المحدد (بعد split, قبل deskew)
+                        لازالة اثر طيات/تمزقات حواف الورقة الظاهرة فوق الجدول.
+                        الاسم هنا لازم يبقى بعد الـ split لو الصورة اتقسمت
+                        (يعني <original_name>_left او <original_name>_right)
+                        او الاسم الاصلي لو مافيش split.
+                        مثال: {"1954-P000001_page-0001_denoised_left": 190}
+    - apply_enhance: لو True، يوضح الكلام (تكبير + شحذ) لكل جزء بعد القص النهائي
+                     (header_part / table_part) - ده بيتطبق آخر حاجة عشان
+                     منكبرش/نشحذش بيكسلات هتتقص وتتشال بعد كده
+    - enhance_scale: معامل التكبير المستخدم في enhance_clarity (افتراضي 2.0)
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -228,6 +440,8 @@ def crop_folder(
         split_offsets = {}
     if custom_crops is None:
         custom_crops = {}
+    if top_margin_crops is None:
+        top_margin_crops = {}
     if default_crops is None:
         default_crops = {
             "header_part": (0, 750, 0, None),
@@ -252,12 +466,42 @@ def crop_folder(
         if needs_split.get(base_name, False):
             offset = split_offsets.get(base_name, 0)
             left_half, right_half = split_left_right(img_array, mid_offset=offset)
+
+            left_name = f"{base_name}_left"
+            right_name = f"{base_name}_right"
+
+            # ---- شيل شريط الطية/التمزق من اعلى كل نصف (لو محدد) ----
+            if left_name in top_margin_crops:
+                cutoff = top_margin_crops[left_name]
+                print(f"  -> قص شريط علوي من {left_name} (cutoff_y={cutoff})")
+                left_half = crop_top_margin(left_half, cutoff)
+
+            if right_name in top_margin_crops:
+                cutoff = top_margin_crops[right_name]
+                print(f"  -> قص شريط علوي من {right_name} (cutoff_y={cutoff})")
+                right_half = crop_top_margin(right_half, cutoff)
+
+            if apply_deskew:
+                print("  -> تصحيح ميلان النصف الايسر:")
+                left_half = deskew_image(left_half)
+                print("  -> تصحيح ميلان النصف الايمن:")
+                right_half = deskew_image(right_half)
+
             parts_to_process = {
-                f"{base_name}_left": left_half,
-                f"{base_name}_right": right_half,
+                left_name: left_half,
+                right_name: right_half,
             }
             print(f"  -> Split into left/right (offset={offset})")
         else:
+            if base_name in top_margin_crops:
+                cutoff = top_margin_crops[base_name]
+                print(f"  -> قص شريط علوي من {base_name} (cutoff_y={cutoff})")
+                img_array = crop_top_margin(img_array, cutoff)
+
+            if apply_deskew:
+                print("  -> تصحيح ميلان الصورة:")
+                img_array = deskew_image(img_array)
+
             parts_to_process = {
                 base_name: img_array,
             }
@@ -268,6 +512,9 @@ def crop_folder(
             sub_crops = crop_header_table(part_array, crops_template)
 
             for sub_name, cropped in sub_crops.items():
+                if apply_enhance:
+                    cropped = enhance_clarity(cropped, scale=enhance_scale)
+
                 out_path = os.path.join(output_dir, f"{part_name}_{sub_name}.png")
                 save_array_as_image(cropped, out_path)
                 print(f"saved: {out_path}  |  shape: {cropped.shape[:2]}")
@@ -284,6 +531,7 @@ if __name__ == "__main__":
 
     # ============================================
     # 2. قص كل الصور المعالجة في data/processed
+    #    (بيتم تصحيح الميلان تلقائيا لكل جزء قبل القص)
     # ============================================
 
     # حدد هنا فقط الصور اللي محتاجة قص يمين/يسار (صفحتين مفتوحتين/spread)
@@ -322,6 +570,15 @@ if __name__ == "__main__":
         "table_part":  (750, None, 0, None),
     }
 
+    # (اختياري) شيل شريط اعلى صورة معينة (بعد split, قبل deskew) لازالة
+    # اثر طيات/تمزقات حواف الورقة الظاهرة فوق الجدول.
+    # حدد القيمة بالعين باستخدام show_with_grid() على الصورة، ثم اكتب هنا
+    # الاسم بعد الـ split (مثال: _left / _right) لو الصورة اتقسمت
+    top_margin_crops = {
+        "1954-P000001_page-0001_denoised_left": 190,
+        # "1954-P000001_page-0001_denoised_right": 0,  # مثال: لو مفيش طية في اليمين
+    }
+
     crop_folder(
         input_dir="data/processed",
         output_dir="data/cropped",
@@ -330,4 +587,8 @@ if __name__ == "__main__":
         split_offsets=split_offsets,
         custom_crops=custom_crops,
         default_crops=default_crops,
+        apply_deskew=True,   # غيّرها لـ False لو عايز ترجع للسلوك القديم بدون تصحيح ميلان
+        top_margin_crops=top_margin_crops,
+        apply_enhance=True,   # يوضح الكلام (تكبير + شحذ) - غيّرها لـ False لو مش محتاجها
+        enhance_scale=4.0,    # جرب 3.0 لو حجم الملفات كبير اوي وعايز توازن افضل
     )
