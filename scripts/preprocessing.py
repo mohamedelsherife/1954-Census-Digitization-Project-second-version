@@ -29,7 +29,7 @@ def process_image(
     output_dir="data/processed",
     block_size=31,
     c_value=15,
-    min_speckle_size=4,
+    min_speckle_size=6,          # <-- كان 4، زودناها عشان تشيل بقايا تشويش اكتر
     show_steps=False,
 ):
     """
@@ -39,6 +39,12 @@ def process_image(
     3) Remove noise (small scattered dots/speckles) via Connected Components
 
     Returns: path to the final cleaned image (denoised.png)
+
+    ملاحظة (v2): min_speckle_size اتزودت من 4 لـ 6 كافتراضي، لأن الملاحظة
+    العملية على الصور دي إن فيه بقايا نقط تشويش صغيرة بعد denoise بالقيمة
+    القديمة. لو لسه فيه تشويش زيادة عندك، جرب تزودها لـ 8-10، ولو لاحظت
+    إن حروف صغيرة أو نقط فوق الحروف (زي التنقيط العربي) بتتشال بالغلط،
+    رجعها لـ 4-5.
     """
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(image_path))[0]
@@ -198,6 +204,11 @@ def enhance_clarity(img_array, scale=4.0, sharpen_amount=1.5, blur_sigma=1.3):
     - blur_sigma: درجة التمويه المستخدمة كأساس لعملية unsharp masking
 
     Returns: الصورة بعد التكبير والشحذ (بنفس عدد القنوات - grayscale او ملونة)
+
+    مهم (v2): الدالة دي لازم تفضل آخر خطوة في الـ pipeline (بعد deskew وبعد
+    القص النهائي)، لأن تشغيل deskew على صورة مكبّرة 4x بيبوّظ اداء
+    HoughLinesP (الخطوط بتبقى ضخمة وبعيدة عن قيم الباراميترات المعتادة).
+    الترتيب في crop_folder تحته بيضمن كده تلقائيًا.
     """
     h, w = img_array.shape[:2]
     new_size = (int(w * scale), int(h * scale))
@@ -214,8 +225,18 @@ def enhance_clarity(img_array, scale=4.0, sharpen_amount=1.5, blur_sigma=1.3):
 # ===============  دوال تصحيح الميلان (Deskew)  ===============
 # ============================================================
 
-def detect_skew_angle(img_array, angle_limit=15, canny_low=50, canny_high=150,
-                       hough_threshold=200, min_line_length_ratio=0.25):
+def detect_skew_angle(
+    img_array,
+    angle_limit=15,
+    canny_low=50,
+    canny_high=150,
+    hough_threshold=70,            # <-- كان 200، قللناها عشان يكتشف خطوط جدول متقطعة/اقل كثافة
+    min_line_length_ratio=0.10,    # <-- كان 0.25، قللناها لان النصف بعد split بيبقى اضيق
+    max_line_gap=50,               # <-- كان تابت جوه الكود بقيمة 20، بقى بارامتر قابل للتعديل
+    min_lines_required=5,          # جديد: حد ادنى لعدد الخطوط عشان نثق في النتيجة
+    label="",
+    verbose=True,
+):
     """
     يكتشف زاوية ميلان الصورة اعتماداً على خطوط الجدول (وليس النص).
 
@@ -228,12 +249,27 @@ def detect_skew_angle(img_array, angle_limit=15, canny_low=50, canny_high=150,
 
     Parameters:
     - angle_limit: اقصى زاوية ميلان متوقعة (بالدرجات) - أي خط زاويته اكبر من كده يتجاهل
+    - hough_threshold: عدد الاصوات (votes) المطلوب في Hough space عشان يتحسب الخط
+                       موجود. (v2) اتقللت من 200 لـ 70 لان القيمة القديمة كانت
+                       بترفض كل الخطوط تقريبا في صور فيها تشويش/انقطاعات كتير.
     - min_line_length_ratio: اقل طول للخط (نسبة من عرض الصورة) عشان يتحسب
-                             (خطوط الجدول الافقية عادة طويلة)
+                             (خطوط الجدول الافقية عادة طويلة). (v2) اتقللت من
+                             0.25 لـ 0.10 عشان تناسب الانصاف الاضيق بعد split.
+    - max_line_gap: اقصى فجوة (بالبكسل) بين نقطتين عشان لسه يتحسبوا خط واحد
+                    متصل. (v2) بقت بارامتر بدل ما كانت قيمة تابتة جوه الكود.
+    - min_lines_required: (جديد) لو عدد الخطوط المقبولة اقل من الرقم ده،
+                          الدالة بترفض تاخد قرار وترجع 0.0 مع تحذير، بدل ما
+                          تاخد قرار غير موثوق بناء على خط او اتنين بس.
+    - label: (جديد) اسم اختياري يتطبع في رسائل الـ verbose، مفيد لما تشغل
+             الدالة دي على كذا صورة وعايز تعرف كل نتيجة تخص مين.
+    - verbose: (جديد) لو True، بيطبع تفاصيل تشخيصية (عدد الخطوط, مدى الزوايا..)
+              مفيد جدا للتأكد ان القرار المتخذ موثوق قبل ما تتطبق على الصورة.
 
     Returns: angle (float) بالدرجات. موجب = ميل عكس عقارب الساعة, سالب = مع عقارب الساعة
-             لو مفيش خطوط كافية اتلاقت, بيرجع 0.0
+             لو مفيش خطوط كافية اتلاقت (اقل من min_lines_required), بيرجع 0.0
     """
+    prefix = f"[{label}] " if label else ""
+
     if len(img_array.shape) == 3:
         gray = cv2.cvtColor(img_array, cv2.COLOR_BGR2GRAY)
     else:
@@ -250,11 +286,12 @@ def detect_skew_angle(img_array, angle_limit=15, canny_low=50, canny_high=150,
         theta=np.pi / 180,
         threshold=hough_threshold,
         minLineLength=min_line_length,
-        maxLineGap=20,
+        maxLineGap=max_line_gap,
     )
 
     if lines is None or len(lines) == 0:
-        print("  !! لم يتم العثور على خطوط كافية لتحديد الميلان - سيتم تجاهل التصحيح")
+        if verbose:
+            print(f"  {prefix}!! لم يتم العثور على خطوط كافية لتحديد الميلان - سيتم تجاهل التصحيح")
         return 0.0
 
     angles = []
@@ -276,25 +313,43 @@ def detect_skew_angle(img_array, angle_limit=15, canny_low=50, canny_high=150,
             weights.append(length)
 
     if not angles:
-        print("  !! لم يتم العثور على خطوط افقية واضحة - سيتم تجاهل التصحيح")
+        if verbose:
+            print(f"  {prefix}!! لم يتم العثور على خطوط افقية واضحة - سيتم تجاهل التصحيح")
+        return 0.0
+
+    # (v2) لو عدد الخطوط المقبولة اقل من الحد الادنى، منثقش في القرار
+    if len(angles) < min_lines_required:
+        if verbose:
+            print(
+                f"  {prefix}!! عدد الخطوط الموثوقة ({len(angles)}) اقل من الحد الادنى "
+                f"({min_lines_required}) - سيتم تجاهل التصحيح لتفادي قرار غير دقيق"
+            )
         return 0.0
 
     # نستخدم "weighted median" بدل median العادي:
     # الخطوط الطويلة (زي حدود الجدول الحقيقية) توزنها اكبر من الخطوط القصيرة
     # (زي خطوط طيات/تمزقات حواف الورقة اللي ممكن تكون بزاوية مختلفة تماما
     # وتخدع median العادي رغم انها قصيرة وغير موثوقة)
-    angles = np.array(angles)
-    weights = np.array(weights)
+    angles_arr = np.array(angles)
+    weights_arr = np.array(weights)
 
-    order = np.argsort(angles)
-    angles_sorted = angles[order]
-    weights_sorted = weights[order]
+    order = np.argsort(angles_arr)
+    angles_sorted = angles_arr[order]
+    weights_sorted = weights_arr[order]
     cum_weights = np.cumsum(weights_sorted)
     cutoff = weights_sorted.sum() / 2.0
     idx = np.searchsorted(cum_weights, cutoff)
     idx = min(idx, len(angles_sorted) - 1)
 
     weighted_median_angle = float(angles_sorted[idx])
+
+    if verbose:
+        print(
+            f"  {prefix}عدد الخطوط الموثوقة: {len(angles)} | "
+            f"مدى الزوايا: [{angles_arr.min():.2f}, {angles_arr.max():.2f}] | "
+            f"الزاوية المختارة (weighted median): {weighted_median_angle:.3f}°"
+        )
+
     return weighted_median_angle
 
 
@@ -332,19 +387,38 @@ def rotate_image(img_array, angle, border_value=255):
     return rotated
 
 
-def deskew_image(img_array, angle_limit=15, min_angle_to_apply=0.1, show_angle=True):
+def deskew_image(
+    img_array,
+    angle_limit=15,
+    min_angle_to_apply=0.1,
+    hough_threshold=70,
+    min_line_length_ratio=0.10,
+    max_line_gap=50,
+    min_lines_required=5,
+    label="",
+    show_angle=True,
+):
     """
     الدالة الرئيسية للتصحيح: تكتشف زاوية الميلان وتصححها.
 
     - min_angle_to_apply: لو الزاوية المكتشفة اصغر من كده، متعملش دوران خالص
                           (عشان منضيعش جودة الصورة بدوران غير ضروري لزاوية شبه معدومة)
+    - باقي الباراميترات (hough_threshold, min_line_length_ratio, max_line_gap,
+      min_lines_required, label) بتتمرر مباشرة لـ detect_skew_angle، شوف
+      توثيقها هناك.
 
     Returns: img_array بعد التصحيح (او نفس الصورة لو الزاوية صغيرة جدا او متلاقتش)
     """
-    angle = detect_skew_angle(img_array, angle_limit=angle_limit)
-
-    if show_angle:
-        print(f"  زاوية الميلان المكتشفة: {angle:.2f} درجة")
+    angle = detect_skew_angle(
+        img_array,
+        angle_limit=angle_limit,
+        hough_threshold=hough_threshold,
+        min_line_length_ratio=min_line_length_ratio,
+        max_line_gap=max_line_gap,
+        min_lines_required=min_lines_required,
+        label=label,
+        verbose=show_angle,
+    )
 
     if abs(angle) < min_angle_to_apply:
         return img_array
@@ -393,6 +467,7 @@ def crop_folder(
     custom_crops=None,
     default_crops=None,
     apply_deskew=True,
+    deskew_params=None,
     top_margin_crops=None,
     apply_enhance=False,
     enhance_scale=2.0,
@@ -411,6 +486,10 @@ def crop_folder(
        - يصحح ميلان الصورة كاملة [لو apply_deskew=True]
        - يقص الصورة الكاملة مباشرة لـ header_part / table_part
 
+    الترتيب مهم وبيفضل زي ما هو (v2): split -> crop_top_margin -> deskew ->
+    crop_header_table -> enhance (اخر حاجة). تشغيل enhance قبل deskew كان
+    بيبوظ اداء اكتشاف الميلان (Hough) لان الصورة بتبقى مكبرة اربع اضعاف.
+
     Parameters:
     - needs_split: dict {اسم_الصورة_بدون_الامتداد: True/False}
                     يحدد هل الصورة محتاجة قص يمين/يسار قبل قص header/table
@@ -420,6 +499,12 @@ def crop_folder(
                      احداثيات مخصصة لقص header/table لصورة (او نصف صورة) معينة
     - default_crops: crops_template افتراضي لأي صورة/نصف مش موجود في custom_crops
     - apply_deskew: لو True، يصحح ميلان كل جزء (بعد split, قبل crop_header_table)
+    - deskew_params: (جديد) dict بباراميترات deskew_image الافتراضية لكل
+                      الصور، مثال:
+                      {"hough_threshold": 70, "min_line_length_ratio": 0.10,
+                       "max_line_gap": 50, "min_lines_required": 5}
+                      لو عايز قيم مختلفة لصورة معينة، استخدم
+                      per_image_deskew_params بدلها.
     - top_margin_crops: dict {اسم_الجزء: cutoff_y}
                         بيشيل شريط من اعلى الجزء المحدد (بعد split, قبل deskew)
                         لازالة اثر طيات/تمزقات حواف الورقة الظاهرة فوق الجدول.
@@ -442,6 +527,13 @@ def crop_folder(
         custom_crops = {}
     if top_margin_crops is None:
         top_margin_crops = {}
+    if deskew_params is None:
+        deskew_params = {
+            "hough_threshold": 70,
+            "min_line_length_ratio": 0.10,
+            "max_line_gap": 50,
+            "min_lines_required": 5,
+        }
     if default_crops is None:
         default_crops = {
             "header_part": (0, 750, 0, None),
@@ -483,9 +575,9 @@ def crop_folder(
 
             if apply_deskew:
                 print("  -> تصحيح ميلان النصف الايسر:")
-                left_half = deskew_image(left_half)
+                left_half = deskew_image(left_half, label=left_name, **deskew_params)
                 print("  -> تصحيح ميلان النصف الايمن:")
-                right_half = deskew_image(right_half)
+                right_half = deskew_image(right_half, label=right_name, **deskew_params)
 
             parts_to_process = {
                 left_name: left_half,
@@ -500,7 +592,7 @@ def crop_folder(
 
             if apply_deskew:
                 print("  -> تصحيح ميلان الصورة:")
-                img_array = deskew_image(img_array)
+                img_array = deskew_image(img_array, label=base_name, **deskew_params)
 
             parts_to_process = {
                 base_name: img_array,
@@ -526,7 +618,11 @@ if __name__ == "__main__":
     # ============================================
     # 1. تنظيف الصور (denoising) لكل الصور في data/raw
     # ============================================
-    results = process_folder("data/raw", pattern="*.jpg")
+    results = process_folder(
+        "data/raw",
+        pattern="*.jpg",
+        min_speckle_size=6,   # (v2) كانت 4 - جرب 8-10 لو لسه فيه تشويش
+    )
     print("Final images:", results)
 
     # ============================================
@@ -579,6 +675,17 @@ if __name__ == "__main__":
         # "1954-P000001_page-0001_denoised_right": 0,  # مثال: لو مفيش طية في اليمين
     }
 
+    # (v2 - جديد) باراميترات اكتشاف الميلان. القيم دي اتظبطت بناء على تشخيص
+    # فعلي اظهر ان القيم القديمة (threshold=200, ratio=0.25) كانت بترفض
+    # كل الخطوط تقريبا. لو لسه الميلان مش بيتصحح صح، قلل hough_threshold
+    # اكتر (مثلا 40-50) او زود max_line_gap.
+    deskew_params = {
+        "hough_threshold": 70,
+        "min_line_length_ratio": 0.10,
+        "max_line_gap": 50,
+        "min_lines_required": 5,
+    }
+
     crop_folder(
         input_dir="data/processed",
         output_dir="data/cropped",
@@ -588,6 +695,7 @@ if __name__ == "__main__":
         custom_crops=custom_crops,
         default_crops=default_crops,
         apply_deskew=True,   # غيّرها لـ False لو عايز ترجع للسلوك القديم بدون تصحيح ميلان
+        deskew_params=deskew_params,
         top_margin_crops=top_margin_crops,
         apply_enhance=True,   # يوضح الكلام (تكبير + شحذ) - غيّرها لـ False لو مش محتاجها
         enhance_scale=4.0,    # جرب 3.0 لو حجم الملفات كبير اوي وعايز توازن افضل
